@@ -19,11 +19,15 @@ module emu
 	inout  [45:0] HPS_BUS,
 
 	//Base video clock. Usually equals to CLK_SYS.
-	output        VGA_CLK,
+	output        CLK_VIDEO,
 
-	//Multiple resolutions are supported using different VGA_CE rates.
+	//Multiple resolutions are supported using different CE_PIXEL rates.
 	//Must be based on CLK_VIDEO
-	output        VGA_CE,
+	output        CE_PIXEL,
+
+	//Video aspect ratio for HDMI. Most retro systems have ratio 4:3.
+	output [11:0] VIDEO_ARX,
+	output [11:0] VIDEO_ARY,
 
 	output  [7:0] VGA_R,
 	output  [7:0] VGA_G,
@@ -32,25 +36,33 @@ module emu
 	output        VGA_VS,
 	output        VGA_DE,    // = ~(VBlank | HBlank)
 	output        VGA_F1,
+	output [1:0]  VGA_SL,
+	output        VGA_SCALER, // Force VGA scaler
 
-	//Base video clock. Usually equals to CLK_SYS.
-	output        HDMI_CLK,
+	// Use framebuffer from DDRAM (USE_FB=1 in qsf)
+	// FB_FORMAT:
+	//    [2:0] : 011=8bpp(palette) 100=16bpp 101=24bpp 110=32bpp
+	//    [3]   : 0=16bits 565 1=16bits 1555
+	//    [4]   : 0=RGB  1=BGR (for 16/24/32 modes)
+	//
+	// FB_STRIDE either 0 (rounded to 256 bytes) or multiple of 16 bytes.
+	output        FB_EN,
+	output  [4:0] FB_FORMAT,
+	output [11:0] FB_WIDTH,
+	output [11:0] FB_HEIGHT,
+	output [31:0] FB_BASE,
+	output [13:0] FB_STRIDE,
+	input         FB_VBL,
+	input         FB_LL,
+	output        FB_FORCE_BLANK,
 
-	//Multiple resolutions are supported using different HDMI_CE rates.
-	//Must be based on CLK_VIDEO
-	output        HDMI_CE,
-
-	output  [7:0] HDMI_R,
-	output  [7:0] HDMI_G,
-	output  [7:0] HDMI_B,
-	output        HDMI_HS,
-	output        HDMI_VS,
-	output        HDMI_DE,   // = ~(VBlank | HBlank)
-	output  [1:0] HDMI_SL,   // scanlines fx
-
-	//Video aspect ratio for HDMI. Most retro systems have ratio 4:3.
-	output  [7:0] HDMI_ARX,
-	output  [7:0] HDMI_ARY,
+	// Palette control for 8bit modes.
+	// Ignored for other video modes.
+	output        FB_PAL_CLK,
+	output  [7:0] FB_PAL_ADDR,
+	output [23:0] FB_PAL_DOUT,
+	input  [23:0] FB_PAL_DIN,
+	output        FB_PAL_WR,
 
 	output        LED_USER,  // 1 - ON, 0 - OFF.
 
@@ -60,9 +72,23 @@ module emu
 	output  [1:0] LED_POWER,
 	output  [1:0] LED_DISK,
 
-	output [15:0] AUDIO_L,
-	output [15:0] AUDIO_R,
-	output        AUDIO_S,   // 1 - signed audio samples, 0 - unsigned
+        input         CLK_AUDIO, // 24.576 MHz
+        output [15:0] AUDIO_L,
+        output [15:0] AUDIO_R,
+        output        AUDIO_S,    // 1 - signed audio samples, 0 - unsigned
+
+        //High latency DDR3 RAM interface
+        //Use for non-critical time purposes
+        output        DDRAM_CLK,
+        input         DDRAM_BUSY,
+        output  [7:0] DDRAM_BURSTCNT,
+        output [28:0] DDRAM_ADDR,
+        input  [63:0] DDRAM_DOUT,
+        input         DDRAM_DOUT_READY,
+        output        DDRAM_RD,
+        output [63:0] DDRAM_DIN,
+        output  [7:0] DDRAM_BE,
+        output        DDRAM_WE,
 
 	// Open-drain User port.
 	// 0 - D+/RX
@@ -76,6 +102,8 @@ module emu
 );
 
 assign VGA_F1    = 0;
+assign VGA_SCALER= 0;
+
 wire         CLK_JOY = CLK_50M;         //Assign clock between 40-50Mhz
 wire   [2:0] JOY_FLAG  = {status[30],status[31],status[29]}; //Assign 3 bits of status (31:29) o (63:61)
 wire         JOY_CLK, JOY_LOAD, JOY_SPLIT, JOY_MDSEL;
@@ -89,8 +117,14 @@ assign LED_DISK  = 0;
 assign LED_POWER = 0;
 assign LED_USER  = ioctl_download;
 
-assign HDMI_ARX  = status[1] ? 8'd16 : status[2] ? 8'd4 : 8'd3;
-assign HDMI_ARY  = status[1] ? 8'd9  : status[2] ? 8'd3 : 8'd4;
+assign {FB_PAL_CLK, FB_FORCE_BLANK, FB_PAL_ADDR, FB_PAL_DOUT, FB_PAL_WR} = '0;
+
+wire [1:0] ar = status[15:14];
+
+
+assign VIDEO_ARX = (!ar) ? ((status[2] ) ? 8'd4 : 8'd3) : (ar - 1'd1);
+assign VIDEO_ARY = (!ar) ? ((status[2] ) ? 8'd3 : 8'd4) : 12'd0;
+
 
 /////////////////////////////////////////////////////////
 
@@ -109,7 +143,7 @@ pll pll (
 localparam CONF_STR = {
 	"A.SBRKOUT;;",
 	"-;",
-	"H0O1,Aspect Ratio,Original,Wide;",
+	"H0OEF,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"H0O2,Orientation,Vert,Horz;",
 	"O35,Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",  
 	"-;",
@@ -121,8 +155,8 @@ localparam CONF_STR = {
 	"OAB,Language,English,German,French,Spanish;",
 	"OC,Balls,3,5;",
 	"O68,Bonus,200,400,600,900,1200,1600,2000,None;",
-	"ODE,Level,Progresive,Cavity,Double;",
-	"OF,Test,Off,On;",
+	"OJK,Level,Progresive,Cavity,Double;",//DE
+	"OL,Test,Off,On;",//F
 	"OG,Color,On,Off;",
 	"-;",
 	"R0,Reset;",
@@ -209,69 +243,24 @@ hps_io #(.STRLEN(($size(CONF_STR)>>3) )) hps_io
 	.ioctl_download(ioctl_download),
 	.ioctl_wr(ioctl_wr),
 	.ioctl_addr(ioctl_addr),
-	.ioctl_dout(ioctl_data),
+	.ioctl_dout(ioctl_data)
 
 	.joy_raw(joydb_1[5:0] | joydb_2[5:0]),
-	.ps2_key(ps2_key)
 );
 
 
 
-wire       pressed = ps2_key[9];
-wire [8:0] code    = ps2_key[8:0];
-always @(posedge clk_sys) begin
-	reg old_state;
-	old_state <= ps2_key[10];
-	
-	if(old_state != ps2_key[10]) begin
-		casex(code)
-//			'hX75: btn_up          <= pressed; // up
-//			'hX72: btn_down        <= pressed; // down
-			'hX6B: btn_left        <= pressed; // left
-			'hX74: btn_right       <= pressed; // right
-			'h029: btn_serve       <= pressed; // space
-			'h014: btn_serve       <= pressed; // ctrl
 
-			'h005: btn_start_1     <= pressed; // F1
-			'h006: btn_start_2     <= pressed; // F2
-			
-			// JPAC/IPAC/MAME Style Codes
-			'h016: btn_start_1     <= pressed; // 1
-			'h01E: btn_start_2     <= pressed; // 2
-			'h02E: btn_coin_1      <= pressed; // 5
-			'h036: btn_coin_2      <= pressed; // 6
-//			'h02D: btn_up_2        <= pressed; // R
-//			'h02B: btn_down_2      <= pressed; // F
-			'h023: btn_left_2      <= pressed; // D
-			'h034: btn_right_2     <= pressed; // G
-			'h01C: btn_serve_2     <= pressed; // A
-		endcase
-	end
-end
+wire m_left	   =   joy[1];
+wire m_right   =   joy[0];
+wire m_serve   =   joy[4] | ~USER_IN[3];
 
-//reg btn_up    =0;
-//reg btn_down  =0;
-reg btn_right   =0;
-reg btn_left    =0;
-reg btn_serve   =0;
-reg btn_start_1 =0;
-reg btn_start_2 =0;
-reg btn_coin_1  =0;
-reg btn_coin_2  =0;
-reg btn_left_2  =0;
-reg btn_right_2 =0;
-reg btn_serve_2 =0;
+wire m_select1 = status[19]; //Select level Double
+wire m_select2 = status[20]; //Select level Progresive
 
-wire m_left	   = btn_left  | btn_left_2  | joy[1];
-wire m_right   = btn_right | btn_right_2 | joy[0];
-wire m_serve   = btn_serve | btn_serve_2 | joy[4] | ~USER_IN[3];
-
-wire m_select1 = status[13]; //Select level Double
-wire m_select2 = status[14]; //Select level Progresive
-
-wire m_start1  = btn_start_1 | joy[5];
-wire m_start2  = btn_start_2 | joy[6];
-wire m_coin    = btn_coin_1  | joy[7];
+wire m_start1  =  joy[5];
+wire m_start2  =  joy[6];
+wire m_coin    =  joy[7];
 
 /*
 -- Configuration DIP switches, these can be brought out to external switches if desired
@@ -332,7 +321,7 @@ super_breakout super_breakout(
 
 	.Audio_O(audio1),
 	.Coin1_I(~m_coin),
-	.Coin2_I(~btn_coin_2),
+	.Coin2_I(1'b1),
 	
 	.Start1_I(~m_start1),
 	.Start2_I(~m_start2),
@@ -341,7 +330,7 @@ super_breakout super_breakout(
 	.Select1_I(~m_select1),
 	.Select2_I(~m_select2),
 	.Slam_I(1),
-	.Test_I(~status[15]),
+	.Test_I(~status[21]),
 	.Enc_A(use_io ? USER_IN[1] : steer0[1]),
 	.Enc_B(use_io ? USER_IN[0] : steer0[0]),
 	.Paddle(status[17] ? (joya ^ 8'h80) : status[18] ? paddle : 8'h00),
@@ -395,7 +384,7 @@ always @(posedge clk_sys) begin
 end
 
 
-arcade_video #(255,224,9) arcade_video
+arcade_video #(255,9) arcade_video
 (
 	.*,
 
@@ -403,10 +392,11 @@ arcade_video #(255,224,9) arcade_video
 	.RGB_in(~status[16]?videorgb:{r,g,b}),
 	.HSync(hs),
 	.VSync(vs),
-	.rotate_ccw(1),
 	
 	.fx(status[5:3])
 );
+wire rotate_ccw = 1;
+screen_rotate screen_rotate (.*);
 
 reg mute;
 always @(posedge clk_sys) begin
