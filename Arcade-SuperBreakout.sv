@@ -243,9 +243,9 @@ hps_io #(.STRLEN(($size(CONF_STR)>>3) )) hps_io
 	.ioctl_download(ioctl_download),
 	.ioctl_wr(ioctl_wr),
 	.ioctl_addr(ioctl_addr),
-	.ioctl_dout(ioctl_data)
+	.ioctl_dout(ioctl_data),
 
-	.joy_raw(joydb_1[5:0] | joydb_2[5:0]),
+	.joy_raw(joydb_1[5:0] | joydb_2[5:0])
 );
 
 
