@@ -293,7 +293,7 @@ always @(posedge clk_sys) begin
 reg [1:0] old_io;
 reg [1:0] old_steer;
 
-	old_io <= USER_IN[1:0];
+	if (~|JOY_FLAG[2:1]) old_io <= USER_IN[1:0];
 	if(old_io != USER_IN[1:0]) use_io <= 1;
 	
 	old_steer <= steer0;
